@@ -1,0 +1,16 @@
+services:
+  langbot:
+    build: .
+    container_name: langbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - langbot_data:/data
+    environment:
+      - DB_PATH=/data/langbot.db
+      - DAILY_SEND_TIME=07:00   # UTC — adjust to your timezone
+
+volumes:
+  langbot_data:
+    driver: local
