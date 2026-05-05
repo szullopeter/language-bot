@@ -65,6 +65,24 @@ class QueueWorker:
             if not yt_id:
                 raise ValueError(f"Could not extract YouTube ID from {url}")
 
+            # Handle Playlists (Experimental)
+            if yt_id.startswith("playlist:"):
+                playlist_id = yt_id.split(":")[1]
+                logger.info(f"Expanding playlist: {playlist_id}")
+                video_ids = self._expand_playlist(playlist_id)
+                if not video_ids:
+                    raise ValueError(f"Could not find any videos in playlist {playlist_id} (YouTube may be blocking scraping)")
+                
+                logger.info(f"Found {len(video_ids)} videos in playlist. Enqueuing them...")
+                for vid in video_ids:
+                    new_url = f"https://www.youtube.com/watch?v={vid}"
+                    self.db.enqueue_video(chat_id, new_url)
+                
+                self.db.update_video_status(video_id, "done", title=f"Playlist: {playlist_id} ({len(video_ids)} videos)")
+                # Trigger queue processing again for the new items
+                asyncio.create_task(self.process_queue())
+                return
+
             transcript_text, title = self._fetch_transcript(yt_id, language)
             self.db.update_video_status(video_id, "processing", title=title, transcript=transcript_text)
 
@@ -92,12 +110,58 @@ class QueueWorker:
 
     def _extract_youtube_id(self, url: str) -> str | None:
         parsed = urlparse(url)
-        if parsed.hostname in ("youtu.be",):
+        hostname = parsed.hostname
+        if not hostname:
+            return None
+            
+        if hostname in ("youtu.be",):
             return parsed.path.lstrip("/").split("?")[0]
-        if parsed.hostname in ("www.youtube.com", "youtube.com"):
+            
+        if "youtube.com" in hostname:
             qs = parse_qs(parsed.query)
-            return qs.get("v", [None])[0]
+            # Prioritize video ID
+            if "v" in qs:
+                return qs["v"][0]
+            # Handle /shorts/ID or /v/ID or /embed/ID
+            path_parts = parsed.path.split("/")
+            if len(path_parts) >= 3 and path_parts[1] in ("shorts", "v", "embed"):
+                return path_parts[2]
+            # Handle playlist ID as fallback if no video ID
+            if "list" in qs:
+                return f"playlist:{qs['list'][0]}"
+                
         return None
+
+    def _expand_playlist(self, playlist_id: str) -> list[str]:
+        """Simple scraping to get video IDs from a playlist page."""
+        try:
+            import requests
+            url = f"https://www.youtube.com/playlist?list={playlist_id}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code != 200:
+                return []
+            
+            # Try multiple patterns
+            video_ids = re.findall(r'"videoId":"([^"]+)"', response.text)
+            if not video_ids:
+                # Fallback: look for v=ID in links
+                video_ids = re.findall(r'v=([a-zA-Z0-9_-]{11})', response.text)
+            
+            # Remove duplicates and preserve order
+            seen = set()
+            unique_ids = []
+            for vid in video_ids:
+                if vid not in seen:
+                    seen.add(vid)
+                    unique_ids.append(vid)
+            return unique_ids
+        except Exception as e:
+            logger.error(f"Failed to expand playlist {playlist_id}: {e}")
+            return []
 
     def _fetch_transcript(self, yt_id: str, language: str) -> tuple[str, str]:
         lang_code = self._language_to_code(language)

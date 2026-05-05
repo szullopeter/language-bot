@@ -15,19 +15,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 YOUTUBE_URL_PATTERN = re.compile(
-    r"(https?://)?(www\.)?(youtube\.com/(watch\?v=|playlist\?list=)|youtu\.be/)[\w\-]+"
+    r"(?:https?://)?(?:[a-zA-Z0-9-]+\.)?(?:youtube\.com/(?:watch\?[\w\-&%=.]*v=[a-zA-Z0-9_-]+|playlist\?[\w\-&%=.]*list=[a-zA-Z0-9_-]+|v/[a-zA-Z0-9_-]+|embed/[a-zA-Z0-9_-]+|shorts/[a-zA-Z0-9_-]+)[\w\-&%=./]*|youtu\.be/[a-zA-Z0-9_-]+(?:\?[\w\-&%=.]+)?)"
 )
-
-db = Database()
-worker = QueueWorker(db)
-scheduler = Scheduler(db)
-llm = LLMClient()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to LangBot!\n\n"
-        "Send me a YouTube video link to extract vocabulary, or just chat with me!\n\n"
+        "Send me a YouTube video link to extract vocabulary, or just chat with me! "
+        "I can also handle lyrics and multiple links at once.\n\n"
         "Commands:\n"
         "/vocab - Get today's new vocabulary\n"
         "/history - See vocabulary from past videos\n"
@@ -43,15 +39,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Check for YouTube links
-    full_urls = re.findall(
-        r"https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|playlist\?list=)|youtu\.be/)[\w\-?=&]+",
-        text
-    )
-
+    # 1. Extract YouTube links
+    full_urls = YOUTUBE_URL_PATTERN.findall(text)
+    
+    # 2. Handle links if any
     if full_urls:
         queued = 0
         for url in full_urls:
+            # Basic normalization: ensure https
+            if not url.startswith("http"):
+                url = "https://" + url
             job_id = db.enqueue_video(chat_id, url)
             if job_id:
                 queued += 1
@@ -59,40 +56,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if queued:
             await update.message.reply_text(
                 f"✅ Queued {queued} video(s) for processing.\n"
-                "I'll extract new vocabulary shortly.\n"
-                "Use /vocab to get vocabulary on demand."
+                "I'll extract new vocabulary shortly."
             )
             # Trigger background processing
             context.application.create_task(worker.process_queue())
-        else:
-            await update.message.reply_text("⚠️ Could not queue those links. They may already be in the queue.")
+        
+        # 3. Check for remaining text (lyrics or questions)
+        remaining_text = text
+        for url in full_urls:
+            remaining_text = remaining_text.replace(url, "")
+        
+        remaining_text = remaining_text.strip()
+        # If there's significant text left, process it with LLM
+        if len(remaining_text) < 2:
+            return # Just links, we are done
+        
+        text_to_process = remaining_text
     else:
-        # General chat via Groq with user context and compressed memory
-        language = db.get_user_language(chat_id)
-        known_words = list(db.get_known_words(chat_id))
-        recent_vids = db.get_processed_videos(chat_id, limit=3)
-        vid_titles = [v['title'] for v in recent_vids]
-        
-        # Get memory from DB
-        chat_history, chat_summary = db.get_chat_memory(chat_id)
-        
-        response, new_history, new_summary = await llm.chat(
-            text, 
-            target_language=language, 
-            known_words=known_words, 
-            recent_videos=vid_titles,
-            chat_history=chat_history,
-            chat_summary=chat_summary
-        )
-        
-        # Save updated memory
-        db.save_chat_memory(chat_id, new_history, new_summary)
-        
-        # Ensure it's telegram compatible
-        if len(response) > 3500:
-            response = response[:3500].rstrip() + "... (shortened)"
-        
-        await update.message.reply_text(response)
+        text_to_process = text
+
+    # 4. General chat via Groq with user context and compressed memory
+    language = db.get_user_language(chat_id)
+    known_words = list(db.get_known_words(chat_id))
+    recent_vids = db.get_processed_videos(chat_id, limit=3)
+    vid_titles = [v['title'] for v in recent_vids]
+    
+    # Get memory from DB
+    chat_history, chat_summary = db.get_chat_memory(chat_id)
+    
+    response, new_history, new_summary = await llm.chat(
+        text_to_process, 
+        target_language=language, 
+        known_words=known_words, 
+        recent_videos=vid_titles,
+        chat_history=chat_history,
+        chat_summary=chat_summary
+    )
+    
+    # Save updated memory
+    db.save_chat_memory(chat_id, new_history, new_summary)
+    
+    # Ensure it's telegram compatible
+    if len(response) > 3500:
+        response = response[:3500].rstrip() + "... (shortened)"
+    
+    await update.message.reply_text(response)
 
 
 async def vocab_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

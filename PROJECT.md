@@ -94,7 +94,7 @@ Telegram Bot (bot.py)
 | Task scheduling | APScheduler in-process | No Redis or Celery. Single container, Python-native. |
 | Translation | MyMemory free API | No API key required for basic use. 1000 words/day free. |
 | Dictionary | `dictionaryapi.dev` | Fully free, no key, includes phonetics and example sentences. |
-| LLM | **Not used** | Deliberate decision. Adds cost and complexity with no clear gain for this use case. |
+| LLM | **Groq (Llama-3)** | Used for conversational practice, grammar correction, and smart vocabulary extraction. |
 | Language | Python 3.12 | Best ecosystem for Telegram bots and async. |
 | Deployment | Docker + Compose | Single command, portable, volume-backed persistence. |
 
@@ -105,7 +105,7 @@ Telegram Bot (bot.py)
 - **No captions = no transcript.** Videos without auto or manual captions are marked `failed` and skipped. In practice most major channels have auto-captions.
 - **No morphological normalisation.** `run`, `ran`, `running` are treated as separate words. A stemmer would reduce noise.
 - **MyMemory rate limit.** 1000 words/day on the free tier. A heavy day of queuing could hit this. Registering a free API key raises it to 10,000.
-- **Playlist expansion not implemented.** Playlist URLs must be broken into individual video URLs manually for now.
+- **Playlist expansion (Experimental).** Basic support for enqueuing videos from a playlist link via scraping.
 - **No retry backoff.** Failed jobs stay in `failed` state and require manual requeue.
 - **Static stop word list.** Needs manual expansion for languages other than English and French.
 
