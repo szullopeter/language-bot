@@ -14,6 +14,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+db = Database()
+llm = LLMClient()
+worker = QueueWorker(db)
+scheduler = Scheduler(db)
+
 YOUTUBE_URL_PATTERN = re.compile(
     r"(?:https?://)?(?:[a-zA-Z0-9-]+\.)?(?:youtube\.com/(?:watch\?[\w\-&%=.]*v=[a-zA-Z0-9_-]+|playlist\?[\w\-&%=.]*list=[a-zA-Z0-9_-]+|v/[a-zA-Z0-9_-]+|embed/[a-zA-Z0-9_-]+|shorts/[a-zA-Z0-9_-]+)[\w\-&%=./]*|youtu\.be/[a-zA-Z0-9_-]+(?:\?[\w\-&%=.]+)?)"
 )
