@@ -1,11 +1,16 @@
 import asyncio
 import logging
 import re
+import json
+import http.cookiejar
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+from youtube_transcript_api.proxies import GenericProxyConfig
+from requests import Session
 from urllib.parse import urlparse, parse_qs
 from dictionary import DictionaryClient
 from database import Database
 from llm_client import LLMClient
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +93,16 @@ class QueueWorker:
 
             known_words = self.db.get_known_words(chat_id)
             
-            # Use LLM for "differentiating of new words"
-            new_words = await self.llm.extract_interesting_words(transcript_text, language, known_words)
+            new_words = []
+            if Config.USE_LLM_EXTRACTION:
+                # Use LLM for "differentiating of new words"
+                new_words = await self.llm.extract_interesting_words(transcript_text, language, known_words)
             
             if not new_words:
-                logger.info("LLM extraction failed or returned nothing, falling back to manual extraction")
+                if Config.USE_LLM_EXTRACTION:
+                    logger.info("LLM extraction failed or returned nothing, falling back to manual extraction")
+                else:
+                    logger.info("Using manual word extraction (LLM disabled)")
                 new_words = self._extract_new_words(transcript_text, known_words)
 
             logger.info(f"Found {len(new_words)} new words for video {yt_id}")
@@ -135,13 +145,31 @@ class QueueWorker:
     def _expand_playlist(self, playlist_id: str) -> list[str]:
         """Simple scraping to get video IDs from a playlist page."""
         try:
-            import requests
+            # Setup proxies
+            proxies_dict = None
+            if Config.YOUTUBE_PROXIES:
+                try:
+                    proxies_dict = json.loads(Config.YOUTUBE_PROXIES)
+                except Exception as e:
+                    logger.error(f"Failed to parse YOUTUBE_PROXIES: {e}")
+
+            # Setup cookies via custom Session
+            session = Session()
+            if Config.YOUTUBE_COOKIES:
+                try:
+                    import http.cookiejar
+                    cj = http.cookiejar.MozillaCookieJar(Config.YOUTUBE_COOKIES)
+                    cj.load(ignore_discard=True, ignore_expires=True)
+                    session.cookies = cj
+                except Exception as e:
+                    logger.error(f"Failed to load YOUTUBE_COOKIES: {e}")
+
             url = f"https://www.youtube.com/playlist?list={playlist_id}"
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
             }
-            response = requests.get(url, headers=headers, timeout=10)
+            response = session.get(url, headers=headers, timeout=10, proxies=proxies_dict)
             if response.status_code != 200:
                 return []
             
@@ -165,15 +193,37 @@ class QueueWorker:
 
     def _fetch_transcript(self, yt_id: str, language: str) -> tuple[str, str]:
         lang_code = self._language_to_code(language)
-        api = YouTubeTranscriptApi()
+        
+        # Setup proxies
+        proxy_config = None
+        proxies_dict = None
+        if Config.YOUTUBE_PROXIES:
+            try:
+                proxies_dict = json.loads(Config.YOUTUBE_PROXIES)
+                proxy_config = GenericProxyConfig(
+                    http_url=proxies_dict.get("http"),
+                    https_url=proxies_dict.get("https")
+                )
+            except Exception as e:
+                logger.error(f"Failed to parse YOUTUBE_PROXIES: {e}")
+
+        # Setup cookies via custom Session
+        session = Session()
+        if Config.YOUTUBE_COOKIES:
+            try:
+                cj = http.cookiejar.MozillaCookieJar(Config.YOUTUBE_COOKIES)
+                cj.load(ignore_discard=True, ignore_expires=True)
+                session.cookies = cj
+                logger.info(f"Loaded YouTube cookies from {Config.YOUTUBE_COOKIES}")
+            except Exception as e:
+                logger.error(f"Failed to load YOUTUBE_COOKIES: {e}")
 
         # 1. Try to fetch the real YouTube title
         title = f"YouTube Video ({yt_id})"
         try:
-            import requests
-            import re
             url = f"https://www.youtube.com/watch?v={yt_id}"
-            response = requests.get(url, timeout=5)
+            # Use the same session and proxies for title fetching
+            response = session.get(url, timeout=5, proxies=proxies_dict)
             if response.status_code == 200:
                 match = re.search(r"<title>(.*?) - YouTube</title>", response.text)
                 if match:
@@ -183,6 +233,7 @@ class QueueWorker:
 
         try:
             # 2. Try to get the preferred language (manual or generated)
+            api = YouTubeTranscriptApi(proxy_config=proxy_config, http_client=session)
             transcript_list = api.list(yt_id)
             try:
                 # find_transcript prefers manual, then falls back to generated for the given codes
