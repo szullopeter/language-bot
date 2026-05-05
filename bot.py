@@ -67,9 +67,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("⚠️ Could not queue those links. They may already be in the queue.")
     else:
-        # General chat via Groq
-        response = await llm.chat(text)
-        # Ensure it's telegram compatible (no complex markdown if requested, but we'll stick to simple formatting)
+        # General chat via Groq with user context and compressed memory
+        language = db.get_user_language(chat_id)
+        known_words = list(db.get_known_words(chat_id))
+        recent_vids = db.get_processed_videos(chat_id, limit=3)
+        vid_titles = [v['title'] for v in recent_vids]
+        
+        # Get memory from DB
+        chat_history, chat_summary = db.get_chat_memory(chat_id)
+        
+        response, new_history, new_summary = await llm.chat(
+            text, 
+            target_language=language, 
+            known_words=known_words, 
+            recent_videos=vid_titles,
+            chat_history=chat_history,
+            chat_summary=chat_summary
+        )
+        
+        # Save updated memory
+        db.save_chat_memory(chat_id, new_history, new_summary)
+        
+        # Ensure it's telegram compatible
         if len(response) > 3500:
             response = response[:3500].rstrip() + "... (shortened)"
         
@@ -78,6 +97,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def vocab_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    
+    # Check if a short ID was provided: /vocab ab12
+    if context.args:
+        short_id = context.args[0].lower()
+        vocab = db.get_vocab_by_short_id(chat_id, short_id)
+        if not vocab:
+            await update.message.reply_text(f"No vocabulary found for ID: `{short_id}`", parse_mode="Markdown")
+            return
+        message = f"📚 *Vocabulary for video {short_id}*\n\n"
+        message += format_vocab_message(vocab)
+        await update.message.reply_text(message, parse_mode="Markdown")
+        return
+
     vocab = db.get_pending_vocab(chat_id)
 
     if not vocab:
@@ -86,6 +118,9 @@ async def vocab_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = format_vocab_message(vocab)
     await update.message.reply_text(message, parse_mode="Markdown")
+    # Mark these as sent so they don't show up in /vocab or the daily update again
+    db.mark_vocab_sent(chat_id)
+    await update.message.reply_text("✅ *Vocabulary marked as seen.* You won't see these in your next update.", parse_mode="Markdown")
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -98,8 +133,10 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["📚 *Recent Videos & Vocabulary*\n"]
     for v in videos:
-        lines.append(f"• [{v['title']}]({v['url']}) — {v['vocab_count']} new words ({v['processed_at'][:10]})")
+        sid = v.get('short_id', '----')
+        lines.append(f"• `{sid}`: [{v['title']}]({v['url']}) — {v['vocab_count']} words")
 
+    lines.append("\n💡 Use `/vocab <id>` to see words for a specific video.")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -127,6 +164,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    db.reset_user_state(chat_id)
+    await update.message.reply_text("💥 *Everything has been reset.* Your history, vocabulary, and known words have been cleared.", parse_mode="Markdown")
+
+
 def format_vocab_message(vocab: list) -> str:
     lines = ["📖 *New Vocabulary*\n"]
     for item in vocab:
@@ -150,6 +193,7 @@ def main():
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("setlang", setlang_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler.start(app)

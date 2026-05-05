@@ -1,5 +1,5 @@
 python-telegram-bot==21.5
-youtube-transcript-api==0.6.2
+youtube-transcript-api>=1.2.4
 aiohttp==3.9.5
 apscheduler==3.10.4
 python-dotenv==1.0.1

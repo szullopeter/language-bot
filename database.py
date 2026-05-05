@@ -1,5 +1,7 @@
 import sqlite3
 import uuid
+import random
+import string
 from datetime import datetime
 from contextlib import contextmanager
 from config import Config
@@ -34,6 +36,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS video_queue (
                     id              TEXT PRIMARY KEY,
+                    short_id        TEXT UNIQUE,
                     chat_id         INTEGER NOT NULL,
                     url             TEXT NOT NULL,
                     status          TEXT DEFAULT 'queued',
@@ -67,9 +70,24 @@ class Database:
                     PRIMARY KEY(chat_id, word)
                 );
 
+                CREATE TABLE IF NOT EXISTS chat_memory (
+                    chat_id     INTEGER PRIMARY KEY,
+                    history     TEXT, -- JSON list of recent messages
+                    summary     TEXT, -- Compressed summary of old history
+                    updated_at  TEXT DEFAULT (datetime('now'))
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_vocab_chat ON vocabulary(chat_id);
                 CREATE INDEX IF NOT EXISTS idx_queue_status ON video_queue(status);
+                CREATE INDEX IF NOT EXISTS idx_queue_short ON video_queue(short_id);
             """)
+
+            # Migration: add short_id if it doesn't exist
+            try:
+                conn.execute("ALTER TABLE video_queue ADD COLUMN short_id TEXT")
+                conn.execute("CREATE UNIQUE INDEX idx_queue_short ON video_queue(short_id)")
+            except sqlite3.OperationalError:
+                pass # Already exists
 
     # --- Users ---
 
@@ -105,15 +123,27 @@ class Database:
             ).fetchone()["language"]
 
         job_id = str(uuid.uuid4())
+        short_id = self._generate_short_id()
+        
         try:
             with self._conn() as conn:
                 conn.execute("""
-                    INSERT INTO video_queue (id, chat_id, url, language)
-                    VALUES (?, ?, ?, ?)
-                """, (job_id, chat_id, url, language))
+                    INSERT INTO video_queue (id, short_id, chat_id, url, language)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (job_id, short_id, chat_id, url, language))
             return job_id
         except sqlite3.IntegrityError:
             return None  # Already queued
+
+    def _generate_short_id(self, length=4) -> str:
+        chars = string.ascii_lowercase + string.digits
+        for _ in range(10): # Try 10 times to get a unique one
+            sid = ''.join(random.choice(chars) for _ in range(length))
+            with self._conn() as conn:
+                res = conn.execute("SELECT 1 FROM video_queue WHERE short_id = ?", (sid,)).fetchone()
+                if not res:
+                    return sid
+        return str(uuid.uuid4())[:length] # Fallback
 
     def get_queued_videos(self, limit: int = 5) -> list:
         with self._conn() as conn:
@@ -218,3 +248,44 @@ class Database:
                 "SELECT * FROM vocabulary WHERE video_id = ?", (video_id,)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_vocab_by_short_id(self, chat_id: int, short_id: str) -> list:
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT v.* FROM vocabulary v
+                JOIN video_queue vq ON v.video_id = vq.id
+                WHERE vq.chat_id = ? AND vq.short_id = ?
+            """, (chat_id, short_id)).fetchall()
+            return [dict(r) for r in rows]
+
+    def reset_user_state(self, chat_id: int):
+        with self._conn() as conn:
+            conn.execute("DELETE FROM vocabulary WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM video_queue WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM known_words WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM chat_memory WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM users WHERE chat_id = ?", (chat_id,))
+
+    def get_chat_memory(self, chat_id: int) -> tuple[list, str]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT history, summary FROM chat_memory WHERE chat_id = ?", (chat_id,)).fetchone()
+            if not row:
+                return [], ""
+            import json
+            history = json.loads(row["history"]) if row["history"] else []
+            return history, row["summary"] or ""
+
+    def save_chat_memory(self, chat_id: int, history: list, summary: str = None):
+        import json
+        history_json = json.dumps(history)
+        with self._conn() as conn:
+            if summary is not None:
+                conn.execute("""
+                    INSERT INTO chat_memory (chat_id, history, summary, updated_at) VALUES (?, ?, ?, datetime('now'))
+                    ON CONFLICT(chat_id) DO UPDATE SET history = excluded.history, summary = excluded.summary, updated_at = excluded.updated_at
+                """, (chat_id, history_json, summary))
+            else:
+                conn.execute("""
+                    INSERT INTO chat_memory (chat_id, history, updated_at) VALUES (?, ?, datetime('now'))
+                    ON CONFLICT(chat_id) DO UPDATE SET history = excluded.history, updated_at = excluded.updated_at
+                """, (chat_id, history_json))

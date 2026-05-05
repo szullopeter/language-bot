@@ -101,16 +101,38 @@ class QueueWorker:
 
     def _fetch_transcript(self, yt_id: str, language: str) -> tuple[str, str]:
         lang_code = self._language_to_code(language)
+        api = YouTubeTranscriptApi()
+
+        # 1. Try to fetch the real YouTube title
+        title = f"YouTube Video ({yt_id})"
         try:
-            transcript = YouTubeTranscriptApi.get_transcript(yt_id, languages=[lang_code])
-        except NoTranscriptFound:
-            # Fallback: grab whatever's available
-            transcript_list = YouTubeTranscriptApi.list_transcripts(yt_id)
-            transcript = transcript_list.find_transcript([lang_code]).fetch()
+            import requests
+            import re
+            url = f"https://www.youtube.com/watch?v={yt_id}"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                match = re.search(r"<title>(.*?) - YouTube</title>", response.text)
+                if match:
+                    title = match.group(1)
+        except Exception as e:
+            logger.debug(f"Failed to fetch real title for {yt_id}: {e}")
+
+        try:
+            # 2. Try to get the preferred language (manual or generated)
+            transcript_list = api.list(yt_id)
+            try:
+                # find_transcript prefers manual, then falls back to generated for the given codes
+                transcript = transcript_list.find_transcript([lang_code]).fetch().to_raw_data()
+            except NoTranscriptFound:
+                # 3. Fallback: Get the first available transcript in any language
+                logger.info(f"No {lang_code} transcript found for {yt_id}, falling back to first available.")
+                transcript = next(iter(transcript_list)).fetch().to_raw_data()
+
+        except Exception as e:
+            logger.error(f"Failed to fetch any transcript for {yt_id}: {e}")
+            raise
 
         full_text = " ".join(entry["text"] for entry in transcript)
-        # Title isn't in the transcript API, so we derive it from the ID
-        title = f"YouTube Video ({yt_id})"
         return full_text, title
 
     def _extract_new_words(self, text: str, known_words: set) -> list[str]:
