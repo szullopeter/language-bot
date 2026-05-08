@@ -60,9 +60,14 @@ Telegram Bot (bot.py)
 
 ## Token efficiency
 
-No LLM is used. The pipeline is:
+This bot uses an LLM (Groq) for:
+- Extracting interesting words from transcripts (smarter than simple tokenization)
+- Conversational chat and answering questions about the vocabulary
+
+The pipeline is:
 - Local stop word filter (zero cost)
 - Known words filter against SQLite (zero cost)  
+- LLM for "interesting" word extraction (Groq - low cost/free tier)
 - Free dictionary API (dictionaryapi.dev) for definitions
 - Free MyMemory API for translations (1000 words/day free, more with API key)
 
@@ -71,6 +76,11 @@ No LLM is used. The pipeline is:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | required | Your bot token from @BotFather |
+| `TELEGRAM_BOT_GROQ` | required | Groq API Key for LLM features |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | LLM model to use |
 | `DAILY_SEND_TIME` | `07:00` | UTC time for daily vocab message |
 | `MYMEMORY_API_KEY` | empty | Optional, increases translation rate limit |
 | `DB_PATH` | `/data/langbot.db` | SQLite database path |
+| `YOUTUBE_COOKIES` | empty | Path to a `cookies.txt` file to avoid IP bans |
+| `YOUTUBE_PROXIES` | empty | JSON string of proxies, e.g. `{"http": "...", "https": "..."}` |
+| `USE_LLM_EXTRACTION` | `false` | Whether to use LLM for word extraction |
